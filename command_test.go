@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -364,6 +364,71 @@ func TestAliasPrefixMatching(t *testing.T) {
 	}
 
 	EnablePrefixMatching = defaultPrefixMatching
+}
+
+// TestPlugin checks usage as plugin for another command such as kubectl.  The
+// executable is `kubectl-plugin`, but we run it as `kubectl plugin`. The help
+// text should reflect the way we run the command.
+func TestPlugin(t *testing.T) {
+	cmd := &Command{
+		Use:     "kubectl-plugin",
+		Version: "1.0.0",
+		Args:    NoArgs,
+		Annotations: map[string]string{
+			CommandDisplayNameAnnotation: "kubectl plugin",
+		},
+		Run: emptyRun,
+	}
+
+	cmdHelp, err := executeCommand(cmd, "-h")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	checkStringContains(t, cmdHelp, "kubectl plugin [flags]")
+	checkStringContains(t, cmdHelp, "help for kubectl plugin")
+	checkStringContains(t, cmdHelp, "version for kubectl plugin")
+}
+
+// TestPluginWithSubCommands checks usage as plugin with sub commands.
+func TestPluginWithSubCommands(t *testing.T) {
+	rootCmd := &Command{
+		Use:     "kubectl-plugin",
+		Version: "1.0.0",
+		Args:    NoArgs,
+		Annotations: map[string]string{
+			CommandDisplayNameAnnotation: "kubectl plugin",
+		},
+	}
+
+	subCmd := &Command{Use: "sub [flags]", Args: NoArgs, Run: emptyRun}
+	rootCmd.AddCommand(subCmd)
+
+	rootHelp, err := executeCommand(rootCmd, "-h")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	checkStringContains(t, rootHelp, "kubectl plugin [command]")
+	checkStringContains(t, rootHelp, "help for kubectl plugin")
+	checkStringContains(t, rootHelp, "version for kubectl plugin")
+	checkStringContains(t, rootHelp, "kubectl plugin [command] --help")
+
+	childHelp, err := executeCommand(rootCmd, "sub", "-h")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	checkStringContains(t, childHelp, "kubectl plugin sub [flags]")
+	checkStringContains(t, childHelp, "help for sub")
+
+	helpHelp, err := executeCommand(rootCmd, "help", "-h")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	checkStringContains(t, helpHelp, "kubectl plugin help [path to command]")
+	checkStringContains(t, helpHelp, "kubectl plugin help [command]")
 }
 
 // TestChildSameName checks the correct behaviour of cobra in cases,
@@ -953,6 +1018,49 @@ func TestSetHelpCommand(t *testing.T) {
 	}
 }
 
+func TestSetHelpTemplate(t *testing.T) {
+	rootCmd := &Command{Use: "root", Run: emptyRun}
+	childCmd := &Command{Use: "child", Run: emptyRun}
+	rootCmd.AddCommand(childCmd)
+
+	rootCmd.SetHelpTemplate("WORKS {{.UseLine}}")
+
+	// Call the help on the root command and check the new template is used
+	got, err := executeCommand(rootCmd, "--help")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	expected := "WORKS " + rootCmd.UseLine()
+	if got != expected {
+		t.Errorf("Expected %q, got %q", expected, got)
+	}
+
+	// Call the help on the child command and check
+	// the new template is inherited from the parent
+	got, err = executeCommand(rootCmd, "child", "--help")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	expected = "WORKS " + childCmd.UseLine()
+	if got != expected {
+		t.Errorf("Expected %q, got %q", expected, got)
+	}
+
+	// Reset the root command help template and make sure
+	// it falls back to the default
+	rootCmd.SetHelpTemplate("")
+	got, err = executeCommand(rootCmd, "--help")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if !strings.Contains(got, "Usage:") {
+		t.Errorf("Expected to contain %q, got %q", "Usage:", got)
+	}
+}
+
 func TestHelpFlagExecuted(t *testing.T) {
 	rootCmd := &Command{Use: "root", Long: "Long description", Run: emptyRun}
 
@@ -1018,6 +1126,45 @@ func TestHelpExecutedOnNonRunnableChild(t *testing.T) {
 	checkStringContains(t, output, childCmd.Long)
 }
 
+func TestSetUsageTemplate(t *testing.T) {
+	rootCmd := &Command{Use: "root", Run: emptyRun}
+	childCmd := &Command{Use: "child", Run: emptyRun}
+	rootCmd.AddCommand(childCmd)
+
+	rootCmd.SetUsageTemplate("WORKS {{.UseLine}}")
+
+	// Trigger the usage on the root command and check the new template is used
+	got, err := executeCommand(rootCmd, "--invalid")
+	if err == nil {
+		t.Errorf("Expected error but did not get one")
+	}
+
+	expected := "WORKS " + rootCmd.UseLine()
+	checkStringContains(t, got, expected)
+
+	// Trigger the usage on the child command and check
+	// the new template is inherited from the parent
+	got, err = executeCommand(rootCmd, "child", "--invalid")
+	if err == nil {
+		t.Errorf("Expected error but did not get one")
+	}
+
+	expected = "WORKS " + childCmd.UseLine()
+	checkStringContains(t, got, expected)
+
+	// Reset the root command usage template and make sure
+	// it falls back to the default
+	rootCmd.SetUsageTemplate("")
+	got, err = executeCommand(rootCmd, "--invalid")
+	if err == nil {
+		t.Errorf("Expected error but did not get one")
+	}
+
+	if !strings.Contains(got, "Usage:") {
+		t.Errorf("Expected to contain %q, got %q", "Usage:", got)
+	}
+}
+
 func TestVersionFlagExecuted(t *testing.T) {
 	rootCmd := &Command{Use: "root", Version: "1.0.0", Run: emptyRun}
 
@@ -1027,6 +1174,24 @@ func TestVersionFlagExecuted(t *testing.T) {
 	}
 
 	checkStringContains(t, output, "root version 1.0.0")
+}
+
+func TestVersionFlagExecutedDiplayName(t *testing.T) {
+	rootCmd := &Command{
+		Use:     "kubectl-plugin",
+		Version: "1.0.0",
+		Annotations: map[string]string{
+			CommandDisplayNameAnnotation: "kubectl plugin",
+		},
+		Run: emptyRun,
+	}
+
+	output, err := executeCommand(rootCmd, "--version", "arg1")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	checkStringContains(t, output, "kubectl plugin version 1.0.0")
 }
 
 func TestVersionFlagExecutedWithNoName(t *testing.T) {
@@ -2031,12 +2196,12 @@ func TestCommandPrintRedirection(t *testing.T) {
 		t.Error(err)
 	}
 
-	gotErrBytes, err := ioutil.ReadAll(errBuff)
+	gotErrBytes, err := io.ReadAll(errBuff)
 	if err != nil {
 		t.Error(err)
 	}
 
-	gotOutBytes, err := ioutil.ReadAll(outBuff)
+	gotOutBytes, err := io.ReadAll(outBuff)
 	if err != nil {
 		t.Error(err)
 	}
@@ -2716,7 +2881,7 @@ func TestFind(t *testing.T) {
 
 func TestUnknownFlagShouldReturnSameErrorRegardlessOfArgPosition(t *testing.T) {
 	testCases := [][]string{
-		//{"--unknown", "--namespace", "foo", "child", "--bar"}, // FIXME: This test case fails, returning the error `unknown command "foo" for "root"` instead of the expected error `unknown flag: --unknown`
+		// {"--unknown", "--namespace", "foo", "child", "--bar"}, // FIXME: This test case fails, returning the error `unknown command "foo" for "root"` instead of the expected error `unknown flag: --unknown`
 		{"--namespace", "foo", "--unknown", "child", "--bar"},
 		{"--namespace", "foo", "child", "--unknown", "--bar"},
 		{"--namespace", "foo", "child", "--bar", "--unknown"},
@@ -2754,5 +2919,18 @@ func TestUnknownFlagShouldReturnSameErrorRegardlessOfArgPosition(t *testing.T) {
 			}
 			checkStringContains(t, output, "unknown flag: --unknown")
 		})
+	}
+}
+
+// This tests verifies that when running unit tests, os.Args are not used.
+// This is because we don't want to process any arguments that are provided
+// by "go test"; instead, unit tests must set the arguments they need using
+// rootCmd.SetArgs().
+func TestNoOSArgsWhenTesting(t *testing.T) {
+	root := &Command{Use: "root", Run: emptyRun}
+	os.Args = append(os.Args, "--unknown")
+
+	if _, err := root.ExecuteC(); err != nil {
+		t.Errorf("error: %v", err)
 	}
 }
